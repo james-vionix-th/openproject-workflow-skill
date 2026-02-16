@@ -51,15 +51,13 @@ Examples:
 ./scripts/openproject_api.py wp-list --page-size 100
 ./scripts/openproject_api.py wp-search-subject --subject-like "lock contention"
 
+./scripts/openproject_api.py notifications-list --reason unread --all-pages
+./scripts/openproject_api.py notifications-unread-count
+./scripts/openproject_api.py notifications-resolve-target --notification-id 123
+
 ./scripts/openproject_api.py wp-create \
   --subject "Investigate production query lock contention" \
   --description-file ./description.md
-
-./scripts/openproject_api.py wp-update \
-  --wp-id 123 \
-  --subject "Investigate production query lock contention (validated)" \
-  --description-file ./update.md \
-  --status-id 4
 
 ./scripts/openproject_api.py wp-comment \
   --wp-id 123 \
@@ -78,6 +76,30 @@ Output format for all subcommands:
 - `wp-update --wp-id [--subject] [--description|--description-file|--description-stdin] [--due-date] [--status-id] [--priority-id] [--assignee-id]`
 - `wp-comment --wp-id [--body|--body-file|--body-stdin]`
 - `wp-activities --wp-id [--page-size]`
+- `notifications-list [--page-size] [--reason unread|all] [--all-pages] [--max-pages]`
+- `notifications-get --notification-id`
+- `notifications-unread-count [--page-size] [--max-pages]`
+- `notifications-mark-read --notification-id`
+- `notifications-mark-unread --notification-id`
+- `notifications-mark-all-read [--page-size] [--max-pages] [--dry-run]`
+- `notifications-resolve-target --notification-id`
+
+## Notification workflow rules
+- Use `notifications-list --reason unread --all-pages` as the default entrypoint for inbox triage.
+- Use `notifications-resolve-target` before mutating work packages so cross-project links are explicit.
+- Before posting comments, read latest activities (`wp-activities`) and skip redundant comments.
+- React only when there is new evidence, a new decision, or a concrete next action.
+- Use `notifications-mark-all-read --dry-run` before bulk read acknowledgements.
+
+Deterministic notification fields returned by list/get:
+- `notification_id`
+- `created_at`
+- `reason`
+- `read_ian`
+- `resource_type`
+- `resource_id`
+- `project_id`
+- `subject`
 
 ## Shell and quoting safety
 - Use `scripts/openproject_api.py` directly; avoid nested wrappers like `bash -lc "zsh -lc ..."`.
@@ -99,8 +121,8 @@ Output format for all subcommands:
 
 ## Output contract for the user
 For each requested operation, return:
-- Action performed (`read`, `create`, `update`, `comment`, `report`)
-- Exact target (`project:<id>`, `work_package:<id>`)
+- Action performed (`read`, `create`, `update`, `comment`, `report`, `notification`)
+- Exact target (`project:<id>`, `work_package:<id>`, `notification:<id>`)
 - Result summary (status, assignee, priority, due date if available)
 - Any unresolved blockers requiring user decision
 

@@ -175,6 +175,127 @@ def _print(status: int, data):
     print(json.dumps({"status": status, "data": data}, indent=2, sort_keys=True))
 
 
+def _path_from_href(href: str) -> str:
+    parsed = urllib.parse.urlparse(href)
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path or "/"
+    else:
+        path = href
+
+    if "?" in path:
+        return path
+    if parsed.query:
+        return f"{path}?{parsed.query}"
+    return path
+
+
+def _href_tail_id(href: str) -> int | None:
+    path = urllib.parse.urlparse(href).path if "://" in href else href
+    seg = path.rstrip("/").split("/")[-1]
+    if seg.isdigit():
+        return int(seg)
+    return None
+
+
+def _resource_type_and_id_from_href(href: str) -> tuple[str | None, int | None]:
+    path = urllib.parse.urlparse(href).path if "://" in href else href
+    segments = [seg for seg in path.split("/") if seg]
+    if "api" not in segments:
+        return None, None
+    try:
+        idx = segments.index("v3")
+    except ValueError:
+        return None, None
+
+    if idx + 1 >= len(segments):
+        return None, None
+
+    resource_type = segments[idx + 1]
+    resource_id = None
+    if idx + 2 < len(segments) and segments[idx + 2].isdigit():
+        resource_id = int(segments[idx + 2])
+
+    return resource_type, resource_id
+
+
+def _notifications_from_hal(data) -> list[dict]:
+    if isinstance(data, dict):
+        embedded = data.get("_embedded") or {}
+        elements = embedded.get("elements")
+        if isinstance(elements, list):
+            return [x for x in elements if isinstance(x, dict)]
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    return []
+
+
+def _notification_summary(item: dict) -> dict:
+    links = item.get("_links") if isinstance(item.get("_links"), dict) else {}
+    resource = links.get("resource") if isinstance(links.get("resource"), dict) else {}
+    project = links.get("project") if isinstance(links.get("project"), dict) else {}
+
+    resource_href = resource.get("href") if isinstance(resource.get("href"), str) else ""
+    project_href = project.get("href") if isinstance(project.get("href"), str) else ""
+
+    resource_type, resource_id = _resource_type_and_id_from_href(resource_href)
+
+    subject = item.get("subject")
+    if not isinstance(subject, str) or not subject:
+        subject = resource.get("title") if isinstance(resource.get("title"), str) else None
+
+    return {
+        "notification_id": item.get("id"),
+        "created_at": item.get("createdAt"),
+        "reason": item.get("reason"),
+        "read_ian": item.get("readIAN"),
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "project_id": _href_tail_id(project_href),
+        "subject": subject,
+    }
+
+
+def _fetch_notifications(*, page_size: int, max_pages: int, reason: str) -> tuple[int, dict | None, list[dict]]:
+    pages = 0
+    path = "/api/v3/notifications"
+    params: dict | None = {"pageSize": page_size}
+    all_items: list[dict] = []
+    last_page = None
+
+    while pages < max_pages:
+        status, data = request_json("GET", path, params=params)
+        if status < 200 or status >= 300 or not isinstance(data, dict):
+            return status, data if isinstance(data, dict) else {"data": data}, []
+
+        last_page = data
+        page_items = _notifications_from_hal(data)
+        all_items.extend(page_items)
+        pages += 1
+
+        next_href = (
+            (data.get("_links") or {}).get("nextByOffset", {}).get("href")
+            if isinstance(data.get("_links"), dict)
+            else None
+        )
+        if not isinstance(next_href, str) or not next_href:
+            break
+
+        path = _path_from_href(next_href)
+        params = None
+
+    if reason == "unread":
+        all_items = [item for item in all_items if item.get("readIAN") is False]
+
+    if last_page is None:
+        return 0, {"error": "no_pages_fetched"}, []
+
+    return 200, {
+        "pages_fetched": pages,
+        "requested_reason": reason,
+        "source_total": last_page.get("total"),
+    }, all_items
+
+
 def cmd_project_get(args):
     status, data = request_json("GET", f"/api/v3/projects/{_project_id(args.project_id)}")
     _print(status, data)
@@ -309,6 +430,145 @@ def cmd_wp_activities(args):
     _print(status, data)
 
 
+def cmd_notifications_list(args):
+    if args.all_pages:
+        status, meta, items = _fetch_notifications(
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+            reason=args.reason,
+        )
+        if status != 200:
+            _print(status, meta)
+            return
+        data = {
+            "meta": meta,
+            "elements": [_notification_summary(item) for item in items],
+            "count": len(items),
+        }
+        _print(200, data)
+        return
+
+    status, raw = request_json("GET", "/api/v3/notifications", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+
+    items = _notifications_from_hal(raw)
+    if args.reason == "unread":
+        items = [item for item in items if item.get("readIAN") is False]
+
+    data = {
+        "meta": {
+            "pages_fetched": 1,
+            "requested_reason": args.reason,
+            "source_total": raw.get("total"),
+        },
+        "elements": [_notification_summary(item) for item in items],
+        "count": len(items),
+    }
+    _print(200, data)
+
+
+def cmd_notifications_get(args):
+    status, raw = request_json("GET", f"/api/v3/notifications/{args.notification_id}")
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+    _print(200, _notification_summary(raw))
+
+
+def cmd_notifications_unread_count(args):
+    status, meta, items = _fetch_notifications(
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+        reason="all",
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+
+    unread = sum(1 for item in items if item.get("readIAN") is False)
+    _print(200, {"unread_count": unread, "meta": meta})
+
+
+def _set_notification_read_state(notification_id: int, read_ian: bool) -> tuple[int, object]:
+    payload = {"readIAN": read_ian}
+    return request_json("PATCH", f"/api/v3/notifications/{notification_id}", data=payload)
+
+
+def cmd_notifications_mark_read(args):
+    status, data = _set_notification_read_state(args.notification_id, True)
+    _print(status, data)
+
+
+def cmd_notifications_mark_unread(args):
+    status, data = _set_notification_read_state(args.notification_id, False)
+    _print(status, data)
+
+
+def cmd_notifications_mark_all_read(args):
+    status, meta, items = _fetch_notifications(
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+        reason="unread",
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+
+    targets = [item for item in items if isinstance(item.get("id"), int)]
+    if args.dry_run:
+        _print(200, {
+            "dry_run": True,
+            "target_notification_ids": [item["id"] for item in targets],
+            "target_count": len(targets),
+            "meta": meta,
+        })
+        return
+
+    updated = []
+    failed = []
+
+    for item in targets:
+        notification_id = item["id"]
+        st, payload = _set_notification_read_state(notification_id, True)
+        if 200 <= st < 300:
+            updated.append(notification_id)
+        else:
+            failed.append({"notification_id": notification_id, "status": st, "data": payload})
+
+    final_status = 200 if not failed else 207
+    _print(final_status, {
+        "updated_notification_ids": updated,
+        "updated_count": len(updated),
+        "failed": failed,
+        "failed_count": len(failed),
+        "meta": meta,
+    })
+
+
+def cmd_notifications_resolve_target(args):
+    status, raw = request_json("GET", f"/api/v3/notifications/{args.notification_id}")
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+
+    summary = _notification_summary(raw)
+    links = raw.get("_links") if isinstance(raw.get("_links"), dict) else {}
+    resource = links.get("resource") if isinstance(links.get("resource"), dict) else {}
+    resource_href = resource.get("href") if isinstance(resource.get("href"), str) else None
+
+    target = {
+        "notification_id": summary["notification_id"],
+        "resource_href": resource_href,
+        "resource_type": summary["resource_type"],
+        "resource_id": summary["resource_id"],
+        "project_id": summary["project_id"],
+        "subject": summary["subject"],
+    }
+    _print(200, target)
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="openproject_api.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -366,6 +626,40 @@ def build_parser():
     sp.add_argument("--wp-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=20)
     sp.set_defaults(fn=cmd_wp_activities)
+
+    sp = sub.add_parser("notifications-list", help="List notifications with deterministic fields")
+    sp.add_argument("--page-size", type=int, default=50)
+    sp.add_argument("--reason", choices=["unread", "all"], default="unread")
+    sp.add_argument("--all-pages", action="store_true", help="Follow nextByOffset links up to --max-pages")
+    sp.add_argument("--max-pages", type=int, default=20)
+    sp.set_defaults(fn=cmd_notifications_list)
+
+    sp = sub.add_parser("notifications-get", help="Get a single notification by id")
+    sp.add_argument("--notification-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_notifications_get)
+
+    sp = sub.add_parser("notifications-unread-count", help="Count unread notifications")
+    sp.add_argument("--page-size", type=int, default=50)
+    sp.add_argument("--max-pages", type=int, default=20)
+    sp.set_defaults(fn=cmd_notifications_unread_count)
+
+    sp = sub.add_parser("notifications-mark-read", help="Mark one notification as read")
+    sp.add_argument("--notification-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_notifications_mark_read)
+
+    sp = sub.add_parser("notifications-mark-unread", help="Mark one notification as unread")
+    sp.add_argument("--notification-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_notifications_mark_unread)
+
+    sp = sub.add_parser("notifications-mark-all-read", help="Mark all unread notifications as read")
+    sp.add_argument("--page-size", type=int, default=50)
+    sp.add_argument("--max-pages", type=int, default=20)
+    sp.add_argument("--dry-run", action="store_true", help="List target ids without mutating")
+    sp.set_defaults(fn=cmd_notifications_mark_all_read)
+
+    sp = sub.add_parser("notifications-resolve-target", help="Resolve notification target resource")
+    sp.add_argument("--notification-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_notifications_resolve_target)
 
     return p
 
