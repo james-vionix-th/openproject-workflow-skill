@@ -492,8 +492,16 @@ def cmd_notifications_unread_count(args):
 
 
 def _set_notification_read_state(notification_id: int, read_ian: bool) -> tuple[int, object]:
-    payload = {"readIAN": read_ian}
-    return request_json("PATCH", f"/api/v3/notifications/{notification_id}", data=payload)
+    action = "read_ian" if read_ian else "unread_ian"
+    return request_json("POST", f"/api/v3/notifications/{notification_id}/{action}")
+
+
+def _set_notification_collection_read_state(read_ian: bool, *, filters: list[dict] | None = None) -> tuple[int, object]:
+    action = "read_ian" if read_ian else "unread_ian"
+    params = None
+    if filters:
+        params = {"filters": json.dumps(filters, separators=(",", ":"))}
+    return request_json("POST", f"/api/v3/notifications/{action}", params=params)
 
 
 def cmd_notifications_mark_read(args):
@@ -526,24 +534,31 @@ def cmd_notifications_mark_all_read(args):
         })
         return
 
-    updated = []
-    failed = []
+    if not targets:
+        _print(200, {
+            "updated_notification_ids": [],
+            "updated_count": 0,
+            "meta": meta,
+        })
+        return
 
-    for item in targets:
-        notification_id = item["id"]
-        st, payload = _set_notification_read_state(notification_id, True)
-        if 200 <= st < 300:
-            updated.append(notification_id)
-        else:
-            failed.append({"notification_id": notification_id, "status": st, "data": payload})
+    # Limit bulk operation to the unresolved notification ids discovered in this run.
+    filters = [{"id": {"operator": "=", "values": [str(item["id"]) for item in targets]}}]
+    st, payload = _set_notification_collection_read_state(True, filters=filters)
+    if 200 <= st < 300:
+        _print(st, {
+            "updated_notification_ids": [item["id"] for item in targets],
+            "updated_count": len(targets),
+            "meta": meta,
+        })
+        return
 
-    final_status = 200 if not failed else 207
-    _print(final_status, {
-        "updated_notification_ids": updated,
-        "updated_count": len(updated),
-        "failed": failed,
-        "failed_count": len(failed),
+    _print(st, {
+        "error": "bulk_mark_read_failed",
+        "target_notification_ids": [item["id"] for item in targets],
+        "target_count": len(targets),
         "meta": meta,
+        "data": payload,
     })
 
 

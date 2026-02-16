@@ -87,6 +87,7 @@ Examples:
 - Before posting comments, read latest activities (`wp-activities`) and skip redundant updates.
 - React only when there is new evidence, a decision, or a concrete next action.
 - Use `notifications-mark-all-read --dry-run` before bulk acknowledgement.
+- Read/unread mutations use OpenProject notification action endpoints (`POST .../read_ian`, `POST .../unread_ian`), not ad hoc field patching.
 
 Deterministic notification fields returned by list/get:
 - `notification_id`
@@ -119,3 +120,7 @@ Before `wp-create`, run a deterministic pre-check in the same project:
 ## Output contract
 - CLI output is authoritative: JSON `{status, data}`.
 - Agent responses may include a concise summary, but must not contradict CLI JSON.
+
+## API references
+- OpenProject Notifications API: https://www.openproject.org/docs/api/endpoints/notifications/
+- OpenProject Work Packages API: https://www.openproject.org/docs/api/endpoints/work-packages/
