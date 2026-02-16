@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Minimal OpenProject API v3 CLI (stdlib-only).
+
+Config rules (mirrors zammad workflow):
+- Read config from the current process environment first.
+- If a local `openproject.env` file exists, load it and override existing
+  `OPENPROJECT_*` vars.
+- No references to global system paths; only optional local file + environment.
+
+Required vars:
+  OPENPROJECT_BASE_URL
+  OPENPROJECT_API_KEY
+  OPENPROJECT_PROJECT_ID
+
+Optional vars:
+  OPENPROJECT_DEFAULT_TYPE_ID
+  OPENPROJECT_DEFAULT_PRIORITY_ID
+  OPENPROJECT_USER_ID
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+import urllib.error
+import urllib.parse
+import urllib.request
+
+_OPENPROJECT_KEYS = {
+    "OPENPROJECT_BASE_URL",
+    "OPENPROJECT_API_KEY",
+    "OPENPROJECT_PROJECT_ID",
+    "OPENPROJECT_DEFAULT_TYPE_ID",
+    "OPENPROJECT_DEFAULT_PRIORITY_ID",
+    "OPENPROJECT_USER_ID",
+}
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines; ignores blanks/comments. Supports optional leading 'export '."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, OSError):
+        return out
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k in _OPENPROJECT_KEYS:
+            out[k] = v
+    return out
+
+
+def _load_local_env() -> None:
+    """If a local openproject.env exists, load and override current environment."""
+    candidates = [
+        Path.cwd() / "openproject.env",
+        Path(__file__).resolve().parent / "openproject.env",
+    ]
+    for p in candidates:
+        if p.exists():
+            for k, v in _parse_env_file(p).items():
+                os.environ[k] = v
+            break
+
+
+def _env(name: str, required: bool = True) -> str:
+    value = os.environ.get(name, "")
+    if required and not value:
+        raise SystemExit(f"Missing env var: {name}")
+    return value
+
+
+def _project_id(cli_project_id: int | None) -> int:
+    if cli_project_id is not None:
+        return cli_project_id
+    return int(_env("OPENPROJECT_PROJECT_ID"))
+
+
+def _read_text_file(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except Exception as e:  # pragma: no cover - CLI error surface
+        raise SystemExit(f"Unable to read file '{path}': {e}") from e
+
+
+def _resolve_text_field(*, inline: str | None, file_path: str | None, from_stdin: bool, field_name: str) -> str:
+    sources = int(inline is not None) + int(file_path is not None) + int(from_stdin)
+    if sources == 0:
+        raise SystemExit(f"Provide one of --{field_name}, --{field_name}-file, or --{field_name}-stdin")
+    if sources > 1:
+        raise SystemExit(f"Use exactly one of --{field_name}, --{field_name}-file, or --{field_name}-stdin")
+
+    if inline is not None:
+        return inline
+    if file_path is not None:
+        return _read_text_file(file_path)
+    return sys.stdin.read()
+
+
+def _json_or_text(raw: str):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def request_json(method: str, path: str, *, data=None, params: dict | None = None):
+    base = _env("OPENPROJECT_BASE_URL").rstrip("/") + "/"
+    token = _env("OPENPROJECT_API_KEY")
+
+    path = path.lstrip("/")
+    url = urllib.parse.urljoin(base, path)
+    if params:
+        url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+
+    basic = base64.b64encode(f"apikey:{token}".encode("utf-8")).decode("ascii")
+    headers = {
+        "Authorization": f"Basic {basic}",
+        "Accept": "application/hal+json",
+    }
+
+    body = None
+    if method.upper() in {"POST", "PUT", "PATCH"}:
+        headers["Content-Type"] = "application/json"
+        if data is None:
+            data = {}
+        body = json.dumps(data).encode("utf-8")
+
+    req = urllib.request.Request(url, data=body, headers=headers, method=method.upper())
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, _json_or_text(raw)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8") if hasattr(e, "read") else ""
+        msg = {
+            "error": "http_error",
+            "status": e.code,
+            "reason": getattr(e, "reason", ""),
+            "body": _json_or_text(raw),
+            "url": url,
+            "method": method.upper(),
+        }
+        return e.code, msg
+    except Exception as e:  # pragma: no cover - defensive fallback for CLI
+        return 0, {"error": "exception", "message": str(e), "url": url, "method": method.upper()}
+
+
+def _default_type_id() -> int:
+    return int(_env("OPENPROJECT_DEFAULT_TYPE_ID"))
+
+
+def _href(kind: str, id_value: int | str) -> dict[str, str]:
+    return {"href": f"/api/v3/{kind}/{id_value}"}
+
+
+def _print(status: int, data):
+    print(json.dumps({"status": status, "data": data}, indent=2, sort_keys=True))
+
+
+def cmd_project_get(args):
+    status, data = request_json("GET", f"/api/v3/projects/{_project_id(args.project_id)}")
+    _print(status, data)
+
+
+def cmd_wp_get(args):
+    status, data = request_json("GET", f"/api/v3/work_packages/{args.wp_id}")
+    _print(status, data)
+
+
+def cmd_wp_list(args):
+    params = {"pageSize": args.page_size}
+    status, data = request_json(
+        "GET",
+        f"/api/v3/projects/{_project_id(args.project_id)}/work_packages",
+        params=params,
+    )
+    _print(status, data)
+
+
+def cmd_wp_search_subject(args):
+    filters = [{"subject": {"operator": "~", "values": [args.subject_like]}}]
+    params = {
+        "pageSize": args.page_size,
+        "filters": json.dumps(filters, separators=(",", ":")),
+    }
+    status, data = request_json(
+        "GET",
+        f"/api/v3/projects/{_project_id(args.project_id)}/work_packages",
+        params=params,
+    )
+    _print(status, data)
+
+
+def cmd_wp_create(args):
+    type_id = args.type_id if args.type_id is not None else _default_type_id()
+    project_id = _project_id(args.project_id)
+
+    payload = {
+        "subject": args.subject,
+        "_links": {
+            "project": _href("projects", project_id),
+            "type": _href("types", type_id),
+        },
+    }
+
+    if args.description is not None or args.description_file is not None or args.description_stdin:
+        description = _resolve_text_field(
+            inline=args.description,
+            file_path=args.description_file,
+            from_stdin=args.description_stdin,
+            field_name="description",
+        )
+        payload["description"] = {"format": "markdown", "raw": description}
+
+    if args.priority_id is not None:
+        payload["_links"]["priority"] = _href("priorities", args.priority_id)
+    if args.assignee_id is not None:
+        payload["_links"]["assignee"] = _href("users", args.assignee_id)
+
+    status, data = request_json("POST", "/api/v3/work_packages", data=payload)
+    _print(status, data)
+
+
+def cmd_wp_update(args):
+    status_get, wp = request_json("GET", f"/api/v3/work_packages/{args.wp_id}")
+    if status_get < 200 or status_get >= 300 or not isinstance(wp, dict):
+        _print(status_get, wp)
+        return
+
+    lock_version = wp.get("lockVersion")
+    if lock_version is None:
+        _print(0, {"error": "missing_lockVersion", "work_package": args.wp_id})
+        return
+
+    patch: dict = {"lockVersion": lock_version}
+
+    if args.subject is not None:
+        patch["subject"] = args.subject
+    if args.description is not None or args.description_file is not None or args.description_stdin:
+        description = _resolve_text_field(
+            inline=args.description,
+            file_path=args.description_file,
+            from_stdin=args.description_stdin,
+            field_name="description",
+        )
+        patch["description"] = {"format": "markdown", "raw": description}
+    if args.due_date is not None:
+        patch["dueDate"] = args.due_date
+
+    links: dict[str, dict[str, str]] = {}
+    if args.status_id is not None:
+        links["status"] = _href("statuses", args.status_id)
+    if args.priority_id is not None:
+        links["priority"] = _href("priorities", args.priority_id)
+    if args.assignee_id is not None:
+        links["assignee"] = _href("users", args.assignee_id)
+    if links:
+        patch["_links"] = links
+
+    if set(patch.keys()) == {"lockVersion"}:
+        raise SystemExit("No fields specified to update")
+
+    status, data = request_json("PATCH", f"/api/v3/work_packages/{args.wp_id}", data=patch)
+    _print(status, data)
+
+
+def cmd_wp_comment(args):
+    body = _resolve_text_field(
+        inline=args.body,
+        file_path=args.body_file,
+        from_stdin=args.body_stdin,
+        field_name="body",
+    )
+
+    payload = {
+        "comment": {
+            "format": "markdown",
+            "raw": body,
+        }
+    }
+    status, data = request_json("POST", f"/api/v3/work_packages/{args.wp_id}/activities", data=payload)
+    _print(status, data)
+
+
+def cmd_wp_activities(args):
+    status, data = request_json(
+        "GET",
+        f"/api/v3/work_packages/{args.wp_id}/activities",
+        params={"pageSize": args.page_size},
+    )
+    _print(status, data)
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="openproject_api.py")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("project-get", help="Get project details")
+    sp.add_argument("--project-id", type=int)
+    sp.set_defaults(fn=cmd_project_get)
+
+    sp = sub.add_parser("wp-get", help="Get one work package")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_wp_get)
+
+    sp = sub.add_parser("wp-list", help="List project work packages")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.set_defaults(fn=cmd_wp_list)
+
+    sp = sub.add_parser("wp-search-subject", help="Search by partial subject match")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--subject-like", required=True)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.set_defaults(fn=cmd_wp_search_subject)
+
+    sp = sub.add_parser("wp-create", help="Create a work package")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--subject", required=True)
+    sp.add_argument("--type-id", type=int)
+    sp.add_argument("--description")
+    sp.add_argument("--description-file", help="Read description text from file")
+    sp.add_argument("--description-stdin", action="store_true", help="Read description text from stdin")
+    sp.add_argument("--priority-id", type=int)
+    sp.add_argument("--assignee-id", type=int)
+    sp.set_defaults(fn=cmd_wp_create)
+
+    sp = sub.add_parser("wp-update", help="Patch a work package")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--subject")
+    sp.add_argument("--description")
+    sp.add_argument("--description-file", help="Read description text from file")
+    sp.add_argument("--description-stdin", action="store_true", help="Read description text from stdin")
+    sp.add_argument("--due-date", help="YYYY-MM-DD")
+    sp.add_argument("--status-id", type=int)
+    sp.add_argument("--priority-id", type=int)
+    sp.add_argument("--assignee-id", type=int)
+    sp.set_defaults(fn=cmd_wp_update)
+
+    sp = sub.add_parser("wp-comment", help="Post a work package activity comment")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--body")
+    sp.add_argument("--body-file", help="Read comment body from file")
+    sp.add_argument("--body-stdin", action="store_true", help="Read comment body from stdin")
+    sp.set_defaults(fn=cmd_wp_comment)
+
+    sp = sub.add_parser("wp-activities", help="List work package activities")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--page-size", type=int, default=20)
+    sp.set_defaults(fn=cmd_wp_activities)
+
+    return p
+
+
+def main(argv):
+    _load_local_env()
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
