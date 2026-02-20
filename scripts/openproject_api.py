@@ -229,6 +229,34 @@ def _notifications_from_hal(data) -> list[dict]:
     return []
 
 
+def _collection_elements(data) -> list[dict]:
+    if isinstance(data, dict):
+        embedded = data.get("_embedded") or {}
+        elements = embedded.get("elements")
+        if isinstance(elements, list):
+            return [x for x in elements if isinstance(x, dict)]
+    return []
+
+
+def _link_ref(links: dict, key: str) -> dict:
+    ref = links.get(key)
+    if not isinstance(ref, dict):
+        return {"id": None, "href": None, "title": None}
+    href = ref.get("href") if isinstance(ref.get("href"), str) else None
+    title = ref.get("title") if isinstance(ref.get("title"), str) else None
+    return {"id": _href_tail_id(href) if href else None, "href": href, "title": title}
+
+
+def _match_name(title: str | None, query: str, exact: bool) -> bool:
+    if not isinstance(title, str):
+        return False
+    lhs = title.casefold().strip()
+    rhs = query.casefold().strip()
+    if exact:
+        return lhs == rhs
+    return rhs in lhs
+
+
 def _notification_summary(item: dict) -> dict:
     links = item.get("_links") if isinstance(item.get("_links"), dict) else {}
     resource = links.get("resource") if isinstance(links.get("resource"), dict) else {}
@@ -428,6 +456,87 @@ def cmd_wp_activities(args):
         params={"pageSize": args.page_size},
     )
     _print(status, data)
+
+
+def _list_reference_collection(path: str, page_size: int) -> tuple[int, object]:
+    status, data = request_json("GET", path, params={"pageSize": page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        return status, data
+
+    out = []
+    for item in _collection_elements(data):
+        out.append({
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "is_default": item.get("isDefault"),
+            "is_closed": item.get("isClosed"),
+        })
+    return 200, {"count": len(out), "elements": out}
+
+
+def cmd_statuses_list(args):
+    status, data = _list_reference_collection("/api/v3/statuses", args.page_size)
+    _print(status, data)
+
+
+def cmd_types_list(args):
+    status, data = _list_reference_collection("/api/v3/types", args.page_size)
+    _print(status, data)
+
+
+def cmd_priorities_list(args):
+    status, data = _list_reference_collection("/api/v3/priorities", args.page_size)
+    _print(status, data)
+
+
+def _resolve_in_collection(path: str, *, name: str, exact: bool, page_size: int) -> tuple[int, object]:
+    status, data = request_json("GET", path, params={"pageSize": page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        return status, data
+
+    matches = []
+    for item in _collection_elements(data):
+        title = item.get("name") if isinstance(item.get("name"), str) else None
+        if _match_name(title, name, exact):
+            matches.append({"id": item.get("id"), "name": title})
+    return 200, {"query": name, "exact": exact, "count": len(matches), "matches": matches}
+
+
+def cmd_statuses_resolve(args):
+    status, data = _resolve_in_collection("/api/v3/statuses", name=args.name, exact=args.exact, page_size=args.page_size)
+    _print(status, data)
+
+
+def cmd_types_resolve(args):
+    status, data = _resolve_in_collection("/api/v3/types", name=args.name, exact=args.exact, page_size=args.page_size)
+    _print(status, data)
+
+
+def cmd_priorities_resolve(args):
+    status, data = _resolve_in_collection("/api/v3/priorities", name=args.name, exact=args.exact, page_size=args.page_size)
+    _print(status, data)
+
+
+def cmd_wp_context(args):
+    status, raw = request_json("GET", f"/api/v3/work_packages/{args.wp_id}")
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+
+    links = raw.get("_links") if isinstance(raw.get("_links"), dict) else {}
+    data = {
+        "work_package_id": raw.get("id"),
+        "subject": raw.get("subject"),
+        "lock_version": raw.get("lockVersion"),
+        "project": _link_ref(links, "project"),
+        "status": _link_ref(links, "status"),
+        "type": _link_ref(links, "type"),
+        "priority": _link_ref(links, "priority"),
+        "assignee": _link_ref(links, "assignee"),
+        "version": _link_ref(links, "version"),
+        "author": _link_ref(links, "author"),
+    }
+    _print(200, data)
 
 
 def cmd_notifications_list(args):
@@ -641,6 +750,40 @@ def build_parser():
     sp.add_argument("--wp-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=20)
     sp.set_defaults(fn=cmd_wp_activities)
+
+    sp = sub.add_parser("wp-context", help="Resolve linked status/type/priority and related refs for one work package")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.set_defaults(fn=cmd_wp_context)
+
+    sp = sub.add_parser("statuses-list", help="List available work package statuses")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_statuses_list)
+
+    sp = sub.add_parser("statuses-resolve", help="Resolve status IDs by status name")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_statuses_resolve)
+
+    sp = sub.add_parser("types-list", help="List available work package types")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_types_list)
+
+    sp = sub.add_parser("types-resolve", help="Resolve type IDs by type name")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_types_resolve)
+
+    sp = sub.add_parser("priorities-list", help="List available priorities")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_priorities_list)
+
+    sp = sub.add_parser("priorities-resolve", help="Resolve priority IDs by priority name")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_priorities_resolve)
 
     sp = sub.add_parser("notifications-list", help="List notifications with deterministic fields")
     sp.add_argument("--page-size", type=int, default=50)

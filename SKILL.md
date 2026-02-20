@@ -50,6 +50,8 @@ Examples:
 ./scripts/openproject_api.py project-get
 ./scripts/openproject_api.py wp-list --page-size 100
 ./scripts/openproject_api.py wp-search-subject --subject-like "lock contention"
+./scripts/openproject_api.py statuses-resolve --name "In progress"
+./scripts/openproject_api.py wp-context --wp-id 123
 
 ./scripts/openproject_api.py notifications-list --reason unread --all-pages
 ./scripts/openproject_api.py notifications-resolve-target --notification-id 123
@@ -72,6 +74,13 @@ Examples:
 - `wp-update --wp-id [--subject] [--description|--description-file|--description-stdin] [--due-date] [--status-id] [--priority-id] [--assignee-id]`
 - `wp-comment --wp-id [--body|--body-file|--body-stdin]`
 - `wp-activities --wp-id [--page-size]`
+- `wp-context --wp-id`
+- `statuses-list [--page-size]`
+- `statuses-resolve --name [--exact] [--page-size]`
+- `types-list [--page-size]`
+- `types-resolve --name [--exact] [--page-size]`
+- `priorities-list [--page-size]`
+- `priorities-resolve --name [--exact] [--page-size]`
 - `notifications-list [--page-size] [--reason unread|all] [--all-pages] [--max-pages]`
 - `notifications-get --notification-id`
 - `notifications-unread-count [--page-size] [--max-pages]`
@@ -104,6 +113,10 @@ Before `wp-create`, run a deterministic pre-check in the same project:
 - `wp-search-subject --subject-like ...`
 - consider likely duplicates only among unresolved candidates with near subject match
 - if likely duplicates exist, present candidate IDs and ask whether to reuse/update or create anyway
+
+## Resolver helpers
+- For status/type/priority IDs, prefer `statuses-resolve`, `types-resolve`, `priorities-resolve` over hardcoded IDs.
+- For single-work-package diagnostics and update preparation, use `wp-context` to inspect linked entities (`status`, `type`, `priority`, `assignee`, `version`, `project`) with both IDs and titles.
 
 ## Shell and quoting safety
 - Run `scripts/openproject_api.py` directly; avoid nested `bash -lc` / `zsh -lc` wrappers.
