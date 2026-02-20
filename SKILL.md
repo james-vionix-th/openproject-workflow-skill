@@ -52,9 +52,12 @@ Examples:
 ./scripts/openproject_api.py wp-search-subject --subject-like "lock contention"
 ./scripts/openproject_api.py statuses-resolve --name "In progress"
 ./scripts/openproject_api.py wp-context --wp-id 123
+./scripts/openproject_api.py wp-activities-last --wp-id 123 --count 5
+./scripts/openproject_api.py wp-list-my-open
 
 ./scripts/openproject_api.py notifications-list --reason unread --all-pages
 ./scripts/openproject_api.py notifications-resolve-target --notification-id 123
+./scripts/openproject_api.py notifications-triage --count 10
 
 ./scripts/openproject_api.py wp-create \
   --subject "Investigate production query lock contention" \
@@ -74,6 +77,14 @@ Examples:
 - `wp-update --wp-id [--subject] [--description|--description-file|--description-stdin] [--due-date] [--status-id] [--priority-id] [--assignee-id]`
 - `wp-comment --wp-id [--body|--body-file|--body-stdin]`
 - `wp-activities --wp-id [--page-size]`
+- `wp-activities-last --wp-id [--count]`
+- `wp-activities-since --wp-id --since [--page-size]`
+- `wp-find [--project-id] [--subject-like] [--status-name] [--assignee-id] [--type-name] [--exact] [--page-size] [--max-pages]`
+- `wp-list-my-open [--project-id] [--page-size] [--max-pages]`
+- `wp-due-soon --days [--project-id] [--assignee-id] [--page-size] [--max-pages]`
+- `wp-stale --inactive-days [--project-id] [--page-size] [--max-pages]`
+- `wp-transition --wp-id --to-status-name [--exact] [--page-size]`
+- `wp-update-by-name --wp-id [--status-name] [--priority-name] [--type-name] [--exact] [--page-size]`
 - `wp-context --wp-id`
 - `statuses-list [--page-size]`
 - `statuses-resolve --name [--exact] [--page-size]`
@@ -81,6 +92,10 @@ Examples:
 - `types-resolve --name [--exact] [--page-size]`
 - `priorities-list [--page-size]`
 - `priorities-resolve --name [--exact] [--page-size]`
+- `users-list [--page-size]`
+- `users-resolve --name [--exact] [--page-size]`
+- `versions-list [--project-id] [--page-size]`
+- `versions-resolve --name [--project-id] [--exact] [--page-size]`
 - `notifications-list [--page-size] [--reason unread|all] [--all-pages] [--max-pages]`
 - `notifications-get --notification-id`
 - `notifications-unread-count [--page-size] [--max-pages]`
@@ -88,6 +103,11 @@ Examples:
 - `notifications-mark-unread --notification-id`
 - `notifications-mark-all-read [--page-size] [--max-pages] [--dry-run]`
 - `notifications-resolve-target --notification-id`
+- `notifications-last [--count] [--reason unread|all]`
+- `notifications-triage [--count] [--reason unread|all]`
+- `notifications-mark-resolved --notification-id --if-wp-status`
+- `report-daily [--project-id] [--since] [--page-size] [--max-pages] [--limit]`
+- `report-assignee --assignee-id --since [--project-id] [--page-size] [--max-pages] [--limit]`
 
 ## Notification workflow rules
 - `notifications-list` is account-scoped, not project-scoped.

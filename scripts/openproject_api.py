@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 import sys
@@ -283,6 +284,116 @@ def _notification_summary(item: dict) -> dict:
     }
 
 
+def _parse_iso_datetime(raw: str | None) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _parse_yyyy_mm_dd(raw: str) -> date:
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as e:
+        raise SystemExit(f"Invalid date '{raw}', expected YYYY-MM-DD") from e
+
+
+def _today_utc_date() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def _wp_link_title(links: dict, key: str) -> str | None:
+    ref = links.get(key)
+    if not isinstance(ref, dict):
+        return None
+    title = ref.get("title")
+    if isinstance(title, str):
+        return title
+    return None
+
+
+def _wp_link_id(links: dict, key: str) -> int | None:
+    ref = links.get(key)
+    if not isinstance(ref, dict):
+        return None
+    href = ref.get("href")
+    if not isinstance(href, str):
+        return None
+    return _href_tail_id(href)
+
+
+def _wp_row(item: dict) -> dict:
+    links = item.get("_links") if isinstance(item.get("_links"), dict) else {}
+    return {
+        "id": item.get("id"),
+        "subject": item.get("subject"),
+        "status_id": _wp_link_id(links, "status"),
+        "status": _wp_link_title(links, "status"),
+        "type_id": _wp_link_id(links, "type"),
+        "type": _wp_link_title(links, "type"),
+        "priority_id": _wp_link_id(links, "priority"),
+        "priority": _wp_link_title(links, "priority"),
+        "assignee_id": _wp_link_id(links, "assignee"),
+        "assignee": _wp_link_title(links, "assignee"),
+        "project_id": _wp_link_id(links, "project"),
+        "version_id": _wp_link_id(links, "version"),
+        "version": _wp_link_title(links, "version"),
+        "due_date": item.get("dueDate"),
+        "created_at": item.get("createdAt"),
+        "updated_at": item.get("updatedAt"),
+    }
+
+
+def _fetch_work_packages(
+    *,
+    project_id: int,
+    page_size: int,
+    max_pages: int,
+    filters: list[dict] | None = None,
+) -> tuple[int, dict | None, list[dict]]:
+    pages = 0
+    path = f"/api/v3/projects/{project_id}/work_packages"
+    params: dict | None = {"pageSize": page_size}
+    if filters:
+        params["filters"] = json.dumps(filters, separators=(",", ":"))
+    all_items: list[dict] = []
+    last_page = None
+
+    while pages < max_pages:
+        status, data = request_json("GET", path, params=params)
+        if status < 200 or status >= 300 or not isinstance(data, dict):
+            return status, data if isinstance(data, dict) else {"data": data}, []
+
+        last_page = data
+        all_items.extend(_collection_elements(data))
+        pages += 1
+
+        next_href = (
+            (data.get("_links") or {}).get("nextByOffset", {}).get("href")
+            if isinstance(data.get("_links"), dict)
+            else None
+        )
+        if not isinstance(next_href, str) or not next_href:
+            break
+
+        path = _path_from_href(next_href)
+        params = None
+
+    if last_page is None:
+        return 0, {"error": "no_pages_fetched"}, []
+
+    return 200, {
+        "pages_fetched": pages,
+        "source_total": last_page.get("total"),
+        "project_id": project_id,
+    }, all_items
+
+
 def _fetch_notifications(*, page_size: int, max_pages: int, reason: str) -> tuple[int, dict | None, list[dict]]:
     pages = 0
     path = "/api/v3/notifications"
@@ -322,6 +433,21 @@ def _fetch_notifications(*, page_size: int, max_pages: int, reason: str) -> tupl
         "requested_reason": reason,
         "source_total": last_page.get("total"),
     }, all_items
+
+
+def _resolve_single_id_or_error(path: str, *, label: str, name: str, exact: bool, page_size: int) -> tuple[int | None, dict | None]:
+    status, data = _resolve_in_collection(path, name=name, exact=exact, page_size=page_size)
+    if status != 200 or not isinstance(data, dict):
+        return None, {"status": status, "data": data}
+    matches = data.get("matches")
+    if not isinstance(matches, list):
+        return None, {"error": f"{label}_resolve_invalid_result", "query": name}
+    if len(matches) == 0:
+        return None, {"error": f"{label}_not_found", "query": name}
+    if len(matches) > 1:
+        return None, {"error": f"{label}_ambiguous", "query": name, "matches": matches}
+    match = matches[0]
+    return match.get("id"), None
 
 
 def cmd_project_get(args):
@@ -458,6 +584,254 @@ def cmd_wp_activities(args):
     _print(status, data)
 
 
+def cmd_wp_activities_last(args):
+    status, data = request_json(
+        "GET",
+        f"/api/v3/work_packages/{args.wp_id}/activities",
+        params={"pageSize": max(args.count, 1)},
+    )
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    elements = _collection_elements(data)
+    rows = []
+    for item in elements[: args.count]:
+        links = item.get("_links") if isinstance(item.get("_links"), dict) else {}
+        user = links.get("user") if isinstance(links.get("user"), dict) else {}
+        comment = item.get("comment") if isinstance(item.get("comment"), dict) else {}
+        rows.append({
+            "id": item.get("id"),
+            "created_at": item.get("createdAt"),
+            "user": user.get("title"),
+            "comment": comment.get("raw"),
+            "details_count": len(item.get("details", [])) if isinstance(item.get("details"), list) else 0,
+        })
+    _print(200, {"work_package_id": args.wp_id, "count": len(rows), "elements": rows})
+
+
+def cmd_wp_activities_since(args):
+    since = _parse_iso_datetime(args.since)
+    if since is None:
+        raise SystemExit("Invalid --since timestamp, expected ISO8601")
+    status, data = request_json(
+        "GET",
+        f"/api/v3/work_packages/{args.wp_id}/activities",
+        params={"pageSize": args.page_size},
+    )
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    rows = []
+    for item in _collection_elements(data):
+        created = _parse_iso_datetime(item.get("createdAt"))
+        if created is None or created < since:
+            continue
+        links = item.get("_links") if isinstance(item.get("_links"), dict) else {}
+        user = links.get("user") if isinstance(links.get("user"), dict) else {}
+        comment = item.get("comment") if isinstance(item.get("comment"), dict) else {}
+        rows.append({
+            "id": item.get("id"),
+            "created_at": item.get("createdAt"),
+            "user": user.get("title"),
+            "comment": comment.get("raw"),
+        })
+    _print(200, {"work_package_id": args.wp_id, "since": args.since, "count": len(rows), "elements": rows})
+
+
+def cmd_wp_find(args):
+    project_id = _project_id(args.project_id)
+    filters: list[dict] = []
+    if args.subject_like:
+        filters.append({"subject": {"operator": "~", "values": [args.subject_like]}})
+    if args.status_name:
+        status_id, err = _resolve_single_id_or_error(
+            "/api/v3/statuses",
+            label="status",
+            name=args.status_name,
+            exact=args.exact,
+            page_size=args.page_size,
+        )
+        if err:
+            _print(400, err)
+            return
+        filters.append({"status": {"operator": "=", "values": [str(status_id)]}})
+    if args.assignee_id is not None:
+        filters.append({"assignee": {"operator": "=", "values": [str(args.assignee_id)]}})
+    if args.type_name:
+        type_id, err = _resolve_single_id_or_error(
+            "/api/v3/types",
+            label="type",
+            name=args.type_name,
+            exact=args.exact,
+            page_size=args.page_size,
+        )
+        if err:
+            _print(400, err)
+            return
+        filters.append({"type": {"operator": "=", "values": [str(type_id)]}})
+
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+        filters=filters or None,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    rows = [_wp_row(x) for x in items]
+    _print(200, {"meta": meta, "count": len(rows), "elements": rows})
+
+
+def _current_user_id() -> int | None:
+    if _env("OPENPROJECT_USER_ID", required=False):
+        try:
+            return int(_env("OPENPROJECT_USER_ID"))
+        except ValueError:
+            pass
+    status, data = request_json("GET", "/api/v3/users/me")
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        return None
+    uid = data.get("id")
+    return uid if isinstance(uid, int) else None
+
+
+def cmd_wp_list_my_open(args):
+    user_id = _current_user_id()
+    if user_id is None:
+        _print(400, {"error": "cannot_resolve_current_user"})
+        return
+    project_id = _project_id(args.project_id)
+    filters = [{"assignee": {"operator": "=", "values": [str(user_id)]}}]
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+        filters=filters,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    rows = [r for r in (_wp_row(x) for x in items) if not (r.get("status") or "").casefold().startswith("closed")]
+    _print(200, {"meta": meta, "assignee_id": user_id, "count": len(rows), "elements": rows})
+
+
+def cmd_wp_due_soon(args):
+    project_id = _project_id(args.project_id)
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    today = _today_utc_date()
+    deadline = today + timedelta(days=args.days)
+    rows = []
+    for row in (_wp_row(x) for x in items):
+        if args.assignee_id is not None and row.get("assignee_id") != args.assignee_id:
+            continue
+        due_raw = row.get("due_date")
+        if not isinstance(due_raw, str):
+            continue
+        try:
+            due = date.fromisoformat(due_raw)
+        except ValueError:
+            continue
+        if today <= due <= deadline:
+            rows.append(row)
+    _print(200, {"meta": meta, "days": args.days, "count": len(rows), "elements": rows})
+
+
+def cmd_wp_stale(args):
+    project_id = _project_id(args.project_id)
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.inactive_days)
+    rows = []
+    for row in (_wp_row(x) for x in items):
+        updated = _parse_iso_datetime(row.get("updated_at"))
+        if updated is None:
+            continue
+        if updated < cutoff:
+            rows.append(row)
+    _print(200, {"meta": meta, "inactive_days": args.inactive_days, "count": len(rows), "elements": rows})
+
+
+def cmd_wp_update_by_name(args):
+    status_get, wp = request_json("GET", f"/api/v3/work_packages/{args.wp_id}")
+    if status_get < 200 or status_get >= 300 or not isinstance(wp, dict):
+        _print(status_get, wp)
+        return
+    lock_version = wp.get("lockVersion")
+    if lock_version is None:
+        _print(0, {"error": "missing_lockVersion", "work_package": args.wp_id})
+        return
+    patch: dict = {"lockVersion": lock_version}
+    links: dict[str, dict[str, str]] = {}
+
+    if args.status_name:
+        status_id, err = _resolve_single_id_or_error(
+            "/api/v3/statuses", label="status", name=args.status_name, exact=args.exact, page_size=args.page_size
+        )
+        if err:
+            _print(400, err)
+            return
+        links["status"] = _href("statuses", status_id)
+
+    if args.priority_name:
+        priority_id, err = _resolve_single_id_or_error(
+            "/api/v3/priorities", label="priority", name=args.priority_name, exact=args.exact, page_size=args.page_size
+        )
+        if err:
+            _print(400, err)
+            return
+        links["priority"] = _href("priorities", priority_id)
+
+    if args.type_name:
+        type_id, err = _resolve_single_id_or_error(
+            "/api/v3/types", label="type", name=args.type_name, exact=args.exact, page_size=args.page_size
+        )
+        if err:
+            _print(400, err)
+            return
+        links["type"] = _href("types", type_id)
+
+    if links:
+        patch["_links"] = links
+    if set(patch.keys()) == {"lockVersion"}:
+        raise SystemExit("No named fields specified to update")
+    status, data = request_json("PATCH", f"/api/v3/work_packages/{args.wp_id}", data=patch)
+    _print(status, data)
+
+
+def cmd_wp_transition(args):
+    status_id, err = _resolve_single_id_or_error(
+        "/api/v3/statuses", label="status", name=args.to_status_name, exact=args.exact, page_size=args.page_size
+    )
+    if err:
+        _print(400, err)
+        return
+    status_get, wp = request_json("GET", f"/api/v3/work_packages/{args.wp_id}")
+    if status_get < 200 or status_get >= 300 or not isinstance(wp, dict):
+        _print(status_get, wp)
+        return
+    lock_version = wp.get("lockVersion")
+    if lock_version is None:
+        _print(0, {"error": "missing_lockVersion", "work_package": args.wp_id})
+        return
+    patch = {"lockVersion": lock_version, "_links": {"status": _href("statuses", status_id)}}
+    status, data = request_json("PATCH", f"/api/v3/work_packages/{args.wp_id}", data=patch)
+    _print(status, data)
+
+
 def _list_reference_collection(path: str, page_size: int) -> tuple[int, object]:
     status, data = request_json("GET", path, params={"pageSize": page_size})
     if status < 200 or status >= 300 or not isinstance(data, dict):
@@ -515,6 +889,69 @@ def cmd_types_resolve(args):
 def cmd_priorities_resolve(args):
     status, data = _resolve_in_collection("/api/v3/priorities", name=args.name, exact=args.exact, page_size=args.page_size)
     _print(status, data)
+
+
+def cmd_users_list(args):
+    status, data = request_json("GET", "/api/v3/users", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    out = []
+    for item in _collection_elements(data):
+        out.append({
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "login": item.get("login"),
+            "email": item.get("email"),
+        })
+    _print(200, {"count": len(out), "elements": out})
+
+
+def cmd_users_resolve(args):
+    status, data = request_json("GET", "/api/v3/users", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    q = args.name.casefold().strip()
+    matches = []
+    for item in _collection_elements(data):
+        name = item.get("name") if isinstance(item.get("name"), str) else ""
+        login = item.get("login") if isinstance(item.get("login"), str) else ""
+        email = item.get("email") if isinstance(item.get("email"), str) else ""
+        haystack = [name.casefold(), login.casefold(), email.casefold()]
+        if args.exact:
+            hit = q in haystack
+        else:
+            hit = any(q in x for x in haystack)
+        if hit:
+            matches.append({"id": item.get("id"), "name": name, "login": login, "email": email})
+    _print(200, {"query": args.name, "exact": args.exact, "count": len(matches), "matches": matches})
+
+
+def cmd_versions_list(args):
+    project_id = _project_id(args.project_id)
+    status, data = request_json("GET", f"/api/v3/projects/{project_id}/versions", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    out = []
+    for item in _collection_elements(data):
+        out.append({"id": item.get("id"), "name": item.get("name"), "status": item.get("status")})
+    _print(200, {"project_id": project_id, "count": len(out), "elements": out})
+
+
+def cmd_versions_resolve(args):
+    project_id = _project_id(args.project_id)
+    status, data = request_json("GET", f"/api/v3/projects/{project_id}/versions", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    matches = []
+    for item in _collection_elements(data):
+        title = item.get("name") if isinstance(item.get("name"), str) else None
+        if _match_name(title, args.name, args.exact):
+            matches.append({"id": item.get("id"), "name": title, "status": item.get("status")})
+    _print(200, {"project_id": project_id, "query": args.name, "exact": args.exact, "count": len(matches), "matches": matches})
 
 
 def cmd_wp_context(args):
@@ -693,6 +1130,144 @@ def cmd_notifications_resolve_target(args):
     _print(200, target)
 
 
+def cmd_notifications_last(args):
+    status, raw = request_json("GET", "/api/v3/notifications", params={"pageSize": max(args.count, 1)})
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+    items = _notifications_from_hal(raw)
+    if args.reason == "unread":
+        items = [item for item in items if item.get("readIAN") is False]
+    out = [_notification_summary(item) for item in items[: args.count]]
+    _print(200, {"count": len(out), "elements": out})
+
+
+def cmd_notifications_triage(args):
+    status, raw = request_json("GET", "/api/v3/notifications", params={"pageSize": max(args.count, 1)})
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+    items = _notifications_from_hal(raw)
+    if args.reason == "unread":
+        items = [item for item in items if item.get("readIAN") is False]
+    rows = []
+    for item in items[: args.count]:
+        summary = _notification_summary(item)
+        tri = {"notification": summary}
+        if summary.get("resource_type") == "work_packages" and isinstance(summary.get("resource_id"), int):
+            st, wp = request_json("GET", f"/api/v3/work_packages/{summary['resource_id']}")
+            if 200 <= st < 300 and isinstance(wp, dict):
+                tri["work_package"] = _wp_row(wp)
+            else:
+                tri["work_package_error"] = {"status": st, "data": wp}
+        rows.append(tri)
+    _print(200, {"count": len(rows), "elements": rows})
+
+
+def cmd_notifications_mark_resolved(args):
+    status, raw = request_json("GET", f"/api/v3/notifications/{args.notification_id}")
+    if status < 200 or status >= 300 or not isinstance(raw, dict):
+        _print(status, raw)
+        return
+    summary = _notification_summary(raw)
+    if summary.get("resource_type") != "work_packages" or not isinstance(summary.get("resource_id"), int):
+        _print(409, {"error": "notification_resource_not_work_package", "notification": summary})
+        return
+    wp_id = summary["resource_id"]
+    st_wp, wp = request_json("GET", f"/api/v3/work_packages/{wp_id}")
+    if st_wp < 200 or st_wp >= 300 or not isinstance(wp, dict):
+        _print(st_wp, wp)
+        return
+    row = _wp_row(wp)
+    if (row.get("status") or "").casefold().strip() != args.if_wp_status.casefold().strip():
+        _print(409, {"error": "status_condition_not_met", "required_status": args.if_wp_status, "actual_status": row.get("status"), "work_package_id": wp_id})
+        return
+    st_mark, mark = _set_notification_read_state(args.notification_id, True)
+    _print(st_mark, {"notification_id": args.notification_id, "work_package_id": wp_id, "mark_result": mark})
+
+
+def _filter_rows_since(rows: list[dict], since_date: date) -> list[dict]:
+    out = []
+    for row in rows:
+        created = _parse_iso_datetime(row.get("created_at"))
+        updated = _parse_iso_datetime(row.get("updated_at"))
+        if (created and created.date() >= since_date) or (updated and updated.date() >= since_date):
+            out.append(row)
+    return out
+
+
+def cmd_report_daily(args):
+    project_id = _project_id(args.project_id)
+    since = _parse_yyyy_mm_dd(args.since) if args.since else (_today_utc_date() - timedelta(days=1))
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    rows = [_wp_row(x) for x in items]
+    scoped = _filter_rows_since(rows, since)
+    created = 0
+    updated = 0
+    closed = 0
+    high_open = []
+    for row in scoped:
+        created_dt = _parse_iso_datetime(row.get("created_at"))
+        updated_dt = _parse_iso_datetime(row.get("updated_at"))
+        if created_dt and created_dt.date() >= since:
+            created += 1
+        if updated_dt and updated_dt.date() >= since:
+            updated += 1
+        status_name = (row.get("status") or "").casefold()
+        if status_name.startswith("closed"):
+            closed += 1
+        priority_name = (row.get("priority") or "").casefold()
+        if "high" in priority_name and not status_name.startswith("closed"):
+            high_open.append(row)
+    _print(200, {
+        "project_id": project_id,
+        "since": since.isoformat(),
+        "created_count": created,
+        "updated_count": updated,
+        "closed_count": closed,
+        "high_open_count": len(high_open),
+        "high_open": high_open[: args.limit],
+        "meta": meta,
+    })
+
+
+def cmd_report_assignee(args):
+    project_id = _project_id(args.project_id)
+    since = _parse_yyyy_mm_dd(args.since)
+    status, meta, items = _fetch_work_packages(
+        project_id=project_id,
+        page_size=args.page_size,
+        max_pages=args.max_pages,
+    )
+    if status != 200:
+        _print(status, meta)
+        return
+    rows = []
+    for item in items:
+        row = _wp_row(item)
+        if row.get("assignee_id") == args.assignee_id:
+            rows.append(row)
+    scoped = _filter_rows_since(rows, since)
+    open_rows = [r for r in rows if not (r.get("status") or "").casefold().startswith("closed")]
+    updated_recent = [r for r in scoped if _parse_iso_datetime(r.get("updated_at")) is not None]
+    _print(200, {
+        "project_id": project_id,
+        "assignee_id": args.assignee_id,
+        "since": since.isoformat(),
+        "backlog_open_count": len(open_rows),
+        "updated_since_count": len(updated_recent),
+        "recent_updates": updated_recent[: args.limit],
+        "meta": meta,
+    })
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="openproject_api.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -751,6 +1326,65 @@ def build_parser():
     sp.add_argument("--page-size", type=int, default=20)
     sp.set_defaults(fn=cmd_wp_activities)
 
+    sp = sub.add_parser("wp-activities-last", help="Return the latest N activities for a work package")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--count", type=int, default=5)
+    sp.set_defaults(fn=cmd_wp_activities_last)
+
+    sp = sub.add_parser("wp-activities-since", help="Return work package activities since ISO8601 timestamp")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--since", required=True, help="ISO8601 timestamp")
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.set_defaults(fn=cmd_wp_activities_since)
+
+    sp = sub.add_parser("wp-find", help="Find work packages using combined filters")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--subject-like")
+    sp.add_argument("--status-name")
+    sp.add_argument("--assignee-id", type=int)
+    sp.add_argument("--type-name")
+    sp.add_argument("--exact", action="store_true")
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.set_defaults(fn=cmd_wp_find)
+
+    sp = sub.add_parser("wp-list-my-open", help="List open work packages assigned to current user")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.set_defaults(fn=cmd_wp_list_my_open)
+
+    sp = sub.add_parser("wp-due-soon", help="List work packages due within N days")
+    sp.add_argument("--days", type=int, required=True)
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--assignee-id", type=int)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.set_defaults(fn=cmd_wp_due_soon)
+
+    sp = sub.add_parser("wp-stale", help="List work packages with no updates for N days")
+    sp.add_argument("--inactive-days", type=int, required=True)
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.set_defaults(fn=cmd_wp_stale)
+
+    sp = sub.add_parser("wp-transition", help="Transition a work package to a named status")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--to-status-name", required=True)
+    sp.add_argument("--exact", action="store_true")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_wp_transition)
+
+    sp = sub.add_parser("wp-update-by-name", help="Update status/type/priority by display names")
+    sp.add_argument("--wp-id", type=int, required=True)
+    sp.add_argument("--status-name")
+    sp.add_argument("--priority-name")
+    sp.add_argument("--type-name")
+    sp.add_argument("--exact", action="store_true")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_wp_update_by_name)
+
     sp = sub.add_parser("wp-context", help="Resolve linked status/type/priority and related refs for one work package")
     sp.add_argument("--wp-id", type=int, required=True)
     sp.set_defaults(fn=cmd_wp_context)
@@ -785,6 +1419,28 @@ def build_parser():
     sp.add_argument("--page-size", type=int, default=200)
     sp.set_defaults(fn=cmd_priorities_resolve)
 
+    sp = sub.add_parser("users-list", help="List users")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_users_list)
+
+    sp = sub.add_parser("users-resolve", help="Resolve users by name/login/email")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_users_resolve)
+
+    sp = sub.add_parser("versions-list", help="List versions for a project")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_versions_list)
+
+    sp = sub.add_parser("versions-resolve", help="Resolve version IDs by name")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_versions_resolve)
+
     sp = sub.add_parser("notifications-list", help="List notifications with deterministic fields")
     sp.add_argument("--page-size", type=int, default=50)
     sp.add_argument("--reason", choices=["unread", "all"], default="unread")
@@ -818,6 +1474,38 @@ def build_parser():
     sp = sub.add_parser("notifications-resolve-target", help="Resolve notification target resource")
     sp.add_argument("--notification-id", type=int, required=True)
     sp.set_defaults(fn=cmd_notifications_resolve_target)
+
+    sp = sub.add_parser("notifications-last", help="Return latest notifications")
+    sp.add_argument("--count", type=int, default=10)
+    sp.add_argument("--reason", choices=["unread", "all"], default="all")
+    sp.set_defaults(fn=cmd_notifications_last)
+
+    sp = sub.add_parser("notifications-triage", help="Return notifications with resolved work package context")
+    sp.add_argument("--count", type=int, default=10)
+    sp.add_argument("--reason", choices=["unread", "all"], default="unread")
+    sp.set_defaults(fn=cmd_notifications_triage)
+
+    sp = sub.add_parser("notifications-mark-resolved", help="Mark notification read only when linked work package status matches")
+    sp.add_argument("--notification-id", type=int, required=True)
+    sp.add_argument("--if-wp-status", required=True)
+    sp.set_defaults(fn=cmd_notifications_mark_resolved)
+
+    sp = sub.add_parser("report-daily", help="Daily summary for project changes")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--since", help="YYYY-MM-DD; defaults to yesterday UTC")
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(fn=cmd_report_daily)
+
+    sp = sub.add_parser("report-assignee", help="Assignee-focused backlog and update summary")
+    sp.add_argument("--assignee-id", type=int, required=True)
+    sp.add_argument("--since", required=True, help="YYYY-MM-DD")
+    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--page-size", type=int, default=100)
+    sp.add_argument("--max-pages", type=int, default=10)
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(fn=cmd_report_assignee)
 
     return p
 
