@@ -120,7 +120,7 @@ class OpenProjectApiTests(unittest.TestCase):
         self.assertEqual(printed["count"], 1)
         self.assertEqual(printed["elements"][0]["id"], 1)
 
-    def test_wp_list_uses_global_collection_with_project_filter(self):
+    def test_wp_list_uses_workspace_collection(self):
         args = SimpleNamespace(project_id=7, page_size=20)
         global_ok = {"_embedded": {"elements": []}, "total": 0}
 
@@ -130,14 +130,11 @@ class OpenProjectApiTests(unittest.TestCase):
             self.mod.cmd_wp_list(args)
 
         req.assert_called_once()
-        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
-        params = req.call_args.kwargs["params"]
-        self.assertEqual(params["pageSize"], 20)
-        filters = json.loads(params["filters"])
-        self.assertEqual(filters, [{"project": {"operator": "=", "values": ["7"]}}])
+        self.assertEqual(req.call_args.args[1], "/api/v3/workspaces/7/work_packages")
+        self.assertEqual(req.call_args.kwargs["params"], {"pageSize": 20})
         self.assertEqual(p.call_args.args[0], 200)
 
-    def test_wp_search_subject_uses_global_collection_with_project_filter(self):
+    def test_wp_search_subject_uses_workspace_collection_with_subject_filter(self):
         args = SimpleNamespace(project_id=7, page_size=20, subject_like="pcn")
         global_ok = {"_embedded": {"elements": []}, "total": 0}
 
@@ -147,12 +144,11 @@ class OpenProjectApiTests(unittest.TestCase):
             self.mod.cmd_wp_search_subject(args)
 
         req.assert_called_once()
-        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
+        self.assertEqual(req.call_args.args[1], "/api/v3/workspaces/7/work_packages")
         filters = json.loads(req.call_args.kwargs["params"]["filters"])
-        self.assertIn({"project": {"operator": "=", "values": ["7"]}}, filters)
-        self.assertIn({"subject": {"operator": "~", "values": ["pcn"]}}, filters)
+        self.assertEqual(filters, [{"subject": {"operator": "~", "values": ["pcn"]}}])
 
-    def test_fetch_work_packages_uses_global_collection(self):
+    def test_fetch_work_packages_uses_workspace_collection(self):
         page = {"_embedded": {"elements": [{"id": 1}]}, "_links": {}, "total": 1}
         with mock.patch.object(self.mod, "request_json", return_value=(200, page)) as req:
             status, meta, items = self.mod._fetch_work_packages(project_id=7, page_size=5, max_pages=2, filters=None)
@@ -160,9 +156,37 @@ class OpenProjectApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(meta["project_id"], 7)
         self.assertEqual([x["id"] for x in items], [1])
-        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
-        filters = json.loads(req.call_args.kwargs["params"]["filters"])
-        self.assertEqual(filters, [{"project": {"operator": "=", "values": ["7"]}}])
+        self.assertEqual(req.call_args.args[1], "/api/v3/workspaces/7/work_packages")
+        self.assertEqual(req.call_args.kwargs["params"], {"pageSize": 5})
+
+    def test_versions_list_uses_workspace_endpoint(self):
+        args = SimpleNamespace(project_id=7, page_size=20)
+        payload = {"_embedded": {"elements": [{"id": 1, "name": "v1", "status": "open"}]}}
+        with mock.patch.object(self.mod, "request_json", return_value=(200, payload)) as req, mock.patch.object(
+            self.mod, "_print"
+        ) as p:
+            self.mod.cmd_versions_list(args)
+        req.assert_called_once_with("GET", "/api/v3/workspaces/7/versions", params={"pageSize": 20})
+        self.assertEqual(p.call_args.args[0], 200)
+        self.assertEqual(p.call_args.args[1]["count"], 1)
+
+    def test_versions_resolve_uses_workspace_endpoint(self):
+        args = SimpleNamespace(project_id=7, page_size=20, name="v", exact=False)
+        payload = {
+            "_embedded": {
+                "elements": [
+                    {"id": 1, "name": "v1", "status": "open"},
+                    {"id": 2, "name": "release", "status": "closed"},
+                ]
+            }
+        }
+        with mock.patch.object(self.mod, "request_json", return_value=(200, payload)) as req, mock.patch.object(
+            self.mod, "_print"
+        ) as p:
+            self.mod.cmd_versions_resolve(args)
+        req.assert_called_once_with("GET", "/api/v3/workspaces/7/versions", params={"pageSize": 20})
+        self.assertEqual(p.call_args.args[0], 200)
+        self.assertEqual(p.call_args.args[1]["count"], 1)
 
     def test_notifications_triage_enriches_work_package(self):
         args = SimpleNamespace(count=3, reason="all")

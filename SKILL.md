@@ -137,6 +137,7 @@ Before `wp-create`, run a deterministic pre-check in the same project:
 ## Resolver helpers
 - For status/type/priority IDs, prefer `statuses-resolve`, `types-resolve`, `priorities-resolve` over hardcoded IDs.
 - For single-work-package diagnostics and update preparation, use `wp-context` to inspect linked entities (`status`, `type`, `priority`, `assignee`, `version`, `project`) with both IDs and titles.
+- `versions-list` / `versions-resolve` call workspace-scoped API (`/api/v3/workspaces/{id}/versions`); `--project-id` remains the CLI flag name for compatibility.
 
 ## Shell and quoting safety
 - Run `scripts/openproject_api.py` directly; avoid nested `bash -lc` / `zsh -lc` wrappers.
@@ -149,7 +150,7 @@ Before `wp-create`, run a deterministic pre-check in the same project:
 - `404`: wrong ID or wrong scope.
 - `409/422`: stale `lockVersion` or validation mismatch; re-read entity and retry once.
 - `429/5xx`: report endpoint + response summary; retry strategy is caller-controlled (not automatic in CLI).
-- Project-scoped work package listing/search is executed via `/api/v3/work_packages` plus a required `project` filter (numeric project id).
+- Project-scoped work package listing/search is executed via `/api/v3/workspaces/{id}/work_packages`.
 
 ## Output contract
 - CLI output is authoritative: JSON `{status, data}`.

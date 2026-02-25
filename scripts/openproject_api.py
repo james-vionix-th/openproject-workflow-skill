@@ -353,23 +353,16 @@ def _encode_filters(filters: list[dict]) -> str:
     return json.dumps(filters, separators=(",", ":"))
 
 
-def _project_scoped_filters(project_id: int, filters: list[dict] | None = None) -> list[dict]:
-    scoped = [f for f in (filters or []) if isinstance(f, dict)]
-    scoped.append({"project": {"operator": "=", "values": [str(project_id)]}})
-    return scoped
-
-
 def _request_project_work_packages_page(
     *,
     project_id: int,
     page_size: int,
     filters: list[dict] | None = None,
 ) -> tuple[int, object]:
-    params = {
-        "pageSize": page_size,
-        "filters": _encode_filters(_project_scoped_filters(project_id, filters)),
-    }
-    return request_json("GET", "/api/v3/work_packages", params=params)
+    params: dict[str, object] = {"pageSize": page_size}
+    if filters:
+        params["filters"] = _encode_filters(filters)
+    return request_json("GET", f"/api/v3/workspaces/{project_id}/work_packages", params=params)
 
 
 def _fetch_work_packages(
@@ -380,11 +373,10 @@ def _fetch_work_packages(
     filters: list[dict] | None = None,
 ) -> tuple[int, dict | None, list[dict]]:
     pages = 0
-    path = "/api/v3/work_packages"
-    params: dict | None = {
-        "pageSize": page_size,
-        "filters": _encode_filters(_project_scoped_filters(project_id, filters)),
-    }
+    path = f"/api/v3/workspaces/{project_id}/work_packages"
+    params: dict | None = {"pageSize": page_size}
+    if filters:
+        params["filters"] = _encode_filters(filters)
     all_items: list[dict] = []
     last_page = None
 
@@ -948,7 +940,7 @@ def cmd_users_resolve(args):
 
 def cmd_versions_list(args):
     project_id = _project_id(args.project_id)
-    status, data = request_json("GET", f"/api/v3/projects/{project_id}/versions", params={"pageSize": args.page_size})
+    status, data = request_json("GET", f"/api/v3/workspaces/{project_id}/versions", params={"pageSize": args.page_size})
     if status < 200 or status >= 300 or not isinstance(data, dict):
         _print(status, data)
         return
@@ -960,7 +952,7 @@ def cmd_versions_list(args):
 
 def cmd_versions_resolve(args):
     project_id = _project_id(args.project_id)
-    status, data = request_json("GET", f"/api/v3/projects/{project_id}/versions", params={"pageSize": args.page_size})
+    status, data = request_json("GET", f"/api/v3/workspaces/{project_id}/versions", params={"pageSize": args.page_size})
     if status < 200 or status >= 300 or not isinstance(data, dict):
         _print(status, data)
         return
@@ -1447,12 +1439,12 @@ def build_parser():
     sp.add_argument("--page-size", type=int, default=200)
     sp.set_defaults(fn=cmd_users_resolve)
 
-    sp = sub.add_parser("versions-list", help="List versions for a project")
+    sp = sub.add_parser("versions-list", help="List versions for a workspace")
     sp.add_argument("--project-id", type=int)
     sp.add_argument("--page-size", type=int, default=200)
     sp.set_defaults(fn=cmd_versions_list)
 
-    sp = sub.add_parser("versions-resolve", help="Resolve version IDs by name")
+    sp = sub.add_parser("versions-resolve", help="Resolve version IDs by name in a workspace")
     sp.add_argument("--name", required=True)
     sp.add_argument("--project-id", type=int)
     sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
