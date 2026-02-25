@@ -120,6 +120,50 @@ class OpenProjectApiTests(unittest.TestCase):
         self.assertEqual(printed["count"], 1)
         self.assertEqual(printed["elements"][0]["id"], 1)
 
+    def test_wp_list_uses_global_collection_with_project_filter(self):
+        args = SimpleNamespace(project_id=7, page_size=20)
+        global_ok = {"_embedded": {"elements": []}, "total": 0}
+
+        with mock.patch.object(self.mod, "request_json", return_value=(200, global_ok)) as req, mock.patch.object(
+            self.mod, "_print"
+        ) as p:
+            self.mod.cmd_wp_list(args)
+
+        req.assert_called_once()
+        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
+        params = req.call_args.kwargs["params"]
+        self.assertEqual(params["pageSize"], 20)
+        filters = json.loads(params["filters"])
+        self.assertEqual(filters, [{"project": {"operator": "=", "values": ["7"]}}])
+        self.assertEqual(p.call_args.args[0], 200)
+
+    def test_wp_search_subject_uses_global_collection_with_project_filter(self):
+        args = SimpleNamespace(project_id=7, page_size=20, subject_like="pcn")
+        global_ok = {"_embedded": {"elements": []}, "total": 0}
+
+        with mock.patch.object(self.mod, "request_json", return_value=(200, global_ok)) as req, mock.patch.object(
+            self.mod, "_print"
+        ):
+            self.mod.cmd_wp_search_subject(args)
+
+        req.assert_called_once()
+        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
+        filters = json.loads(req.call_args.kwargs["params"]["filters"])
+        self.assertIn({"project": {"operator": "=", "values": ["7"]}}, filters)
+        self.assertIn({"subject": {"operator": "~", "values": ["pcn"]}}, filters)
+
+    def test_fetch_work_packages_uses_global_collection(self):
+        page = {"_embedded": {"elements": [{"id": 1}]}, "_links": {}, "total": 1}
+        with mock.patch.object(self.mod, "request_json", return_value=(200, page)) as req:
+            status, meta, items = self.mod._fetch_work_packages(project_id=7, page_size=5, max_pages=2, filters=None)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(meta["project_id"], 7)
+        self.assertEqual([x["id"] for x in items], [1])
+        self.assertEqual(req.call_args.args[1], "/api/v3/work_packages")
+        filters = json.loads(req.call_args.kwargs["params"]["filters"])
+        self.assertEqual(filters, [{"project": {"operator": "=", "values": ["7"]}}])
+
     def test_notifications_triage_enriches_work_package(self):
         args = SimpleNamespace(count=3, reason="all")
         notif_page = {

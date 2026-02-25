@@ -349,6 +349,29 @@ def _wp_row(item: dict) -> dict:
     }
 
 
+def _encode_filters(filters: list[dict]) -> str:
+    return json.dumps(filters, separators=(",", ":"))
+
+
+def _project_scoped_filters(project_id: int, filters: list[dict] | None = None) -> list[dict]:
+    scoped = [f for f in (filters or []) if isinstance(f, dict)]
+    scoped.append({"project": {"operator": "=", "values": [str(project_id)]}})
+    return scoped
+
+
+def _request_project_work_packages_page(
+    *,
+    project_id: int,
+    page_size: int,
+    filters: list[dict] | None = None,
+) -> tuple[int, object]:
+    params = {
+        "pageSize": page_size,
+        "filters": _encode_filters(_project_scoped_filters(project_id, filters)),
+    }
+    return request_json("GET", "/api/v3/work_packages", params=params)
+
+
 def _fetch_work_packages(
     *,
     project_id: int,
@@ -357,10 +380,11 @@ def _fetch_work_packages(
     filters: list[dict] | None = None,
 ) -> tuple[int, dict | None, list[dict]]:
     pages = 0
-    path = f"/api/v3/projects/{project_id}/work_packages"
-    params: dict | None = {"pageSize": page_size}
-    if filters:
-        params["filters"] = json.dumps(filters, separators=(",", ":"))
+    path = "/api/v3/work_packages"
+    params: dict | None = {
+        "pageSize": page_size,
+        "filters": _encode_filters(_project_scoped_filters(project_id, filters)),
+    }
     all_items: list[dict] = []
     last_page = None
 
@@ -461,25 +485,19 @@ def cmd_wp_get(args):
 
 
 def cmd_wp_list(args):
-    params = {"pageSize": args.page_size}
-    status, data = request_json(
-        "GET",
-        f"/api/v3/projects/{_project_id(args.project_id)}/work_packages",
-        params=params,
+    status, data = _request_project_work_packages_page(
+        project_id=_project_id(args.project_id),
+        page_size=args.page_size,
     )
     _print(status, data)
 
 
 def cmd_wp_search_subject(args):
     filters = [{"subject": {"operator": "~", "values": [args.subject_like]}}]
-    params = {
-        "pageSize": args.page_size,
-        "filters": json.dumps(filters, separators=(",", ":")),
-    }
-    status, data = request_json(
-        "GET",
-        f"/api/v3/projects/{_project_id(args.project_id)}/work_packages",
-        params=params,
+    status, data = _request_project_work_packages_page(
+        project_id=_project_id(args.project_id),
+        page_size=args.page_size,
+        filters=filters,
     )
     _print(status, data)
 
