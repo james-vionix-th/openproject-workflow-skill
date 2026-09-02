@@ -54,7 +54,7 @@ Examples:
 ./scripts/openproject_api.py statuses-resolve --name "In progress"
 ./scripts/openproject_api.py wp-context --wp-id 123
 ./scripts/openproject_api.py wp-activities-last --wp-id 123 --count 5
-./scripts/openproject_api.py wp-list-my-open
+./scripts/openproject_api.py wp-list-my-open --project-id 7
 
 ./scripts/openproject_api.py notifications-list --reason unread --all-pages
 ./scripts/openproject_api.py notifications-resolve-target --notification-id 123

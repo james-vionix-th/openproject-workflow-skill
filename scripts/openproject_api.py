@@ -486,12 +486,29 @@ def cmd_projects_resolve(args):
     if status < 200 or status >= 300 or not isinstance(data, dict):
         _print(status, data)
         return
-    matches = []
+    projects = []
     for item in _collection_elements(data):
         name = item.get("name") if isinstance(item.get("name"), str) else None
         identifier = item.get("identifier") if isinstance(item.get("identifier"), str) else None
-        if _match_name(name, args.name, args.exact) or _match_name(identifier, args.name, args.exact):
-            matches.append({"id": item.get("id"), "identifier": identifier, "name": name})
+        projects.append({"id": item.get("id"), "identifier": identifier, "name": name})
+
+    query = args.name.casefold()
+    exact_identifier_matches = [
+        item for item in projects if item["identifier"] is not None and item["identifier"].casefold() == query
+    ]
+    exact_name_matches = [item for item in projects if item["name"] is not None and item["name"].casefold() == query]
+    if exact_identifier_matches:
+        matches = exact_identifier_matches
+    elif exact_name_matches:
+        matches = exact_name_matches
+    elif args.exact:
+        matches = []
+    else:
+        matches = [
+            item
+            for item in projects
+            if _match_name(item["name"], args.name, False) or _match_name(item["identifier"], args.name, False)
+        ]
     _print(200, {"query": args.name, "exact": args.exact, "count": len(matches), "matches": matches})
 
 

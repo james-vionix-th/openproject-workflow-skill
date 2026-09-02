@@ -100,8 +100,28 @@ class OpenProjectApiTests(unittest.TestCase):
             },
         )
 
-    def test_projects_resolve_returns_ambiguous_candidates(self):
+    def test_projects_resolve_prefers_exact_identifier_over_partial_matches(self):
         args = SimpleNamespace(name="vionix", exact=False, page_size=100)
+        payload = {
+            "_embedded": {
+                "elements": [
+                    {"id": 3, "identifier": "vionix", "name": "Vionix"},
+                    {"id": 7, "identifier": "vionix-web", "name": "Vionix Web"},
+                    {"id": 4, "identifier": "utac", "name": "UTAC"},
+                ]
+            }
+        }
+        with mock.patch.object(self.mod, "request_json", return_value=(200, payload)), mock.patch.object(
+            self.mod, "_print"
+        ) as printed:
+            self.mod.cmd_projects_resolve(args)
+
+        result = printed.call_args.args[1]
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["matches"], [{"id": 3, "identifier": "vionix", "name": "Vionix"}])
+
+    def test_projects_resolve_returns_ambiguous_partial_candidates(self):
+        args = SimpleNamespace(name="vioni", exact=False, page_size=100)
         payload = {
             "_embedded": {
                 "elements": [
