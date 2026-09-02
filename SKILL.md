@@ -30,7 +30,6 @@ Search order for env file:
 Required keys:
 - `OPENPROJECT_BASE_URL`
 - `OPENPROJECT_API_KEY`
-- `OPENPROJECT_PROJECT_ID`
 
 Optional keys:
 - `OPENPROJECT_USER_ID`
@@ -47,9 +46,11 @@ Use the bundled CLI:
 Examples:
 
 ```bash
-./scripts/openproject_api.py project-get
-./scripts/openproject_api.py wp-list --page-size 100
-./scripts/openproject_api.py wp-search-subject --subject-like "lock contention"
+./scripts/openproject_api.py projects-list
+./scripts/openproject_api.py projects-resolve --name "Vionix"
+./scripts/openproject_api.py project-get --project-id 7
+./scripts/openproject_api.py wp-list --project-id 7 --page-size 100
+./scripts/openproject_api.py wp-search-subject --project-id 7 --subject-like "lock contention"
 ./scripts/openproject_api.py statuses-resolve --name "In progress"
 ./scripts/openproject_api.py wp-context --wp-id 123
 ./scripts/openproject_api.py wp-activities-last --wp-id 123 --count 5
@@ -60,6 +61,7 @@ Examples:
 ./scripts/openproject_api.py notifications-triage --count 10
 
 ./scripts/openproject_api.py wp-create \
+  --project-id 7 \
   --subject "Investigate production query lock contention" \
   --description-file ./description.md
 
@@ -69,20 +71,22 @@ Examples:
 ```
 
 ## Supported commands
-- `project-get [--project-id]`
+- `projects-list [--page-size]`
+- `projects-resolve --name [--exact] [--page-size]`
+- `project-get --project-id`
 - `wp-get --wp-id`
-- `wp-list [--project-id] [--page-size]`
-- `wp-search-subject [--project-id] --subject-like [--page-size]`
-- `wp-create [--project-id] --subject [--type-id] [--description|--description-file|--description-stdin] [--priority-id] [--assignee-id]`
+- `wp-list --project-id [--page-size]`
+- `wp-search-subject --project-id --subject-like [--page-size]`
+- `wp-create --project-id --subject [--type-id] [--description|--description-file|--description-stdin] [--priority-id] [--assignee-id]`
 - `wp-update --wp-id [--subject] [--description|--description-file|--description-stdin] [--due-date] [--status-id] [--priority-id] [--assignee-id]`
 - `wp-comment --wp-id [--body|--body-file|--body-stdin]`
 - `wp-activities --wp-id [--page-size]`
 - `wp-activities-last --wp-id [--count]`
 - `wp-activities-since --wp-id --since [--page-size]`
-- `wp-find [--project-id] [--subject-like] [--status-name] [--assignee-id] [--type-name] [--exact] [--page-size] [--max-pages]`
-- `wp-list-my-open [--project-id] [--page-size] [--max-pages]`
-- `wp-due-soon --days [--project-id] [--assignee-id] [--page-size] [--max-pages]`
-- `wp-stale --inactive-days [--project-id] [--page-size] [--max-pages]`
+- `wp-find --project-id [--subject-like] [--status-name] [--assignee-id] [--type-name] [--exact] [--page-size] [--max-pages]`
+- `wp-list-my-open --project-id [--page-size] [--max-pages]`
+- `wp-due-soon --days --project-id [--assignee-id] [--page-size] [--max-pages]`
+- `wp-stale --inactive-days --project-id [--page-size] [--max-pages]`
 - `wp-transition --wp-id --to-status-name [--exact] [--page-size]`
 - `wp-update-by-name --wp-id [--status-name] [--priority-name] [--type-name] [--exact] [--page-size]`
 - `wp-context --wp-id`
@@ -94,8 +98,8 @@ Examples:
 - `priorities-resolve --name [--exact] [--page-size]`
 - `users-list [--page-size]`
 - `users-resolve --name [--exact] [--page-size]`
-- `versions-list [--project-id] [--page-size]`
-- `versions-resolve --name [--project-id] [--exact] [--page-size]`
+- `versions-list --project-id [--page-size]`
+- `versions-resolve --name --project-id [--exact] [--page-size]`
 - `notifications-list [--page-size] [--reason unread|all] [--all-pages] [--max-pages]`
 - `notifications-get --notification-id`
 - `notifications-unread-count [--page-size] [--max-pages]`
@@ -106,8 +110,18 @@ Examples:
 - `notifications-last [--count] [--reason unread|all]`
 - `notifications-triage [--count] [--reason unread|all]`
 - `notifications-mark-resolved --notification-id --if-wp-status`
-- `report-daily [--project-id] [--since] [--page-size] [--max-pages] [--limit]`
-- `report-assignee --assignee-id --since [--project-id] [--page-size] [--max-pages] [--limit]`
+- `report-daily --project-id [--since] [--page-size] [--max-pages] [--limit]`
+- `report-assignee --assignee-id --since --project-id [--page-size] [--max-pages] [--limit]`
+
+## Project scope rules
+- Project scope must come from an explicit, freshly resolved `--project-id`; there is no environment-level default project.
+- Before a project-scoped command, resolve the user's project reference with `projects-resolve` or list candidates with `projects-list`.
+- Prefer an exact identifier, then an exact name. A unique partial match is acceptable only when returned by the resolver.
+- If resolution returns zero matches, report that the project was not found or is not visible to the API user.
+- If resolution returns multiple matches, present each candidate's ID, identifier, and name and ask the user which project to use.
+- Never silently select the first project or reuse project context from an unrelated request.
+- Existing-resource commands keyed by `--wp-id` infer project context from the fetched work package and do not require `--project-id`.
+- Writes that create a resource require one verified project ID. Cross-project reads must be explicitly requested and are not currently provided by the CLI.
 
 ## Notification workflow rules
 - `notifications-list` is account-scoped, not project-scoped.

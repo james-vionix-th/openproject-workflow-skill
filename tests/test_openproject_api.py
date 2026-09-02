@@ -48,6 +48,84 @@ class OpenProjectApiTests(unittest.TestCase):
         self.assertFalse(self.mod._match_name("In Progress", "progress", exact=True))
         self.assertTrue(self.mod._match_name("In Progress", "in progress", exact=True))
 
+    def test_project_id_requires_explicit_cli_scope(self):
+        with mock.patch.dict(os.environ, {"OPENPROJECT_PROJECT_ID": "7"}):
+            with self.assertRaises(SystemExit) as ctx:
+                self.mod._project_id(None)
+
+        self.assertEqual(str(ctx.exception), "Provide --project-id for this project-scoped command")
+        self.assertNotIn("OPENPROJECT_PROJECT_ID", self.mod._OPENPROJECT_KEYS)
+
+    def test_project_scoped_commands_require_project_id_at_parse_time(self):
+        parser = self.mod.build_parser()
+        cases = [
+            ["project-get"],
+            ["wp-list"],
+            ["wp-search-subject", "--subject-like", "x"],
+            ["wp-create", "--subject", "x"],
+            ["wp-find"],
+            ["wp-list-my-open"],
+            ["wp-due-soon", "--days", "1"],
+            ["wp-stale", "--inactive-days", "1"],
+            ["versions-list"],
+            ["versions-resolve", "--name", "v"],
+            ["report-daily"],
+            ["report-assignee", "--assignee-id", "1", "--since", "2026-01-01"],
+        ]
+
+        for argv in cases:
+            with self.subTest(argv=argv), self.assertRaises(SystemExit):
+                parser.parse_args(argv)
+
+    def test_projects_list_returns_project_identity_fields(self):
+        args = SimpleNamespace(page_size=100)
+        payload = {
+            "_embedded": {
+                "elements": [
+                    {"id": 3, "identifier": "vionix", "name": "Vionix", "status": "active"}
+                ]
+            }
+        }
+        with mock.patch.object(self.mod, "request_json", return_value=(200, payload)) as req, mock.patch.object(
+            self.mod, "_print"
+        ) as printed:
+            self.mod.cmd_projects_list(args)
+
+        req.assert_called_once_with("GET", "/api/v3/projects", params={"pageSize": 100})
+        self.assertEqual(
+            printed.call_args.args[1],
+            {
+                "count": 1,
+                "elements": [{"id": 3, "identifier": "vionix", "name": "Vionix", "status": "active"}],
+            },
+        )
+
+    def test_projects_resolve_returns_ambiguous_candidates(self):
+        args = SimpleNamespace(name="vionix", exact=False, page_size=100)
+        payload = {
+            "_embedded": {
+                "elements": [
+                    {"id": 3, "identifier": "vionix", "name": "Vionix"},
+                    {"id": 7, "identifier": "vionix-web", "name": "Vionix Web"},
+                    {"id": 4, "identifier": "utac", "name": "UTAC"},
+                ]
+            }
+        }
+        with mock.patch.object(self.mod, "request_json", return_value=(200, payload)), mock.patch.object(
+            self.mod, "_print"
+        ) as printed:
+            self.mod.cmd_projects_resolve(args)
+
+        result = printed.call_args.args[1]
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(
+            result["matches"],
+            [
+                {"id": 3, "identifier": "vionix", "name": "Vionix"},
+                {"id": 7, "identifier": "vionix-web", "name": "Vionix Web"},
+            ],
+        )
+
     def test_notification_summary(self):
         payload = {
             "id": 99,

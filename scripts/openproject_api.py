@@ -10,7 +10,6 @@ Config rules (mirrors zammad workflow):
 Required vars:
   OPENPROJECT_BASE_URL
   OPENPROJECT_API_KEY
-  OPENPROJECT_PROJECT_ID
 
 Optional vars:
   OPENPROJECT_DEFAULT_TYPE_ID
@@ -34,7 +33,6 @@ import urllib.request
 _OPENPROJECT_KEYS = {
     "OPENPROJECT_BASE_URL",
     "OPENPROJECT_API_KEY",
-    "OPENPROJECT_PROJECT_ID",
     "OPENPROJECT_DEFAULT_TYPE_ID",
     "OPENPROJECT_DEFAULT_PRIORITY_ID",
     "OPENPROJECT_USER_ID",
@@ -88,7 +86,7 @@ def _env(name: str, required: bool = True) -> str:
 def _project_id(cli_project_id: int | None) -> int:
     if cli_project_id is not None:
         return cli_project_id
-    return int(_env("OPENPROJECT_PROJECT_ID"))
+    raise SystemExit("Provide --project-id for this project-scoped command")
 
 
 def _read_text_file(path: str) -> str:
@@ -464,6 +462,37 @@ def _resolve_single_id_or_error(path: str, *, label: str, name: str, exact: bool
         return None, {"error": f"{label}_ambiguous", "query": name, "matches": matches}
     match = matches[0]
     return match.get("id"), None
+
+
+def cmd_projects_list(args):
+    status, data = request_json("GET", "/api/v3/projects", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    elements = [
+        {
+            "id": item.get("id"),
+            "identifier": item.get("identifier"),
+            "name": item.get("name"),
+            "status": item.get("status"),
+        }
+        for item in _collection_elements(data)
+    ]
+    _print(200, {"count": len(elements), "elements": elements})
+
+
+def cmd_projects_resolve(args):
+    status, data = request_json("GET", "/api/v3/projects", params={"pageSize": args.page_size})
+    if status < 200 or status >= 300 or not isinstance(data, dict):
+        _print(status, data)
+        return
+    matches = []
+    for item in _collection_elements(data):
+        name = item.get("name") if isinstance(item.get("name"), str) else None
+        identifier = item.get("identifier") if isinstance(item.get("identifier"), str) else None
+        if _match_name(name, args.name, args.exact) or _match_name(identifier, args.name, args.exact):
+            matches.append({"id": item.get("id"), "identifier": identifier, "name": name})
+    _print(200, {"query": args.name, "exact": args.exact, "count": len(matches), "matches": matches})
 
 
 def cmd_project_get(args):
@@ -1282,8 +1311,18 @@ def build_parser():
     p = argparse.ArgumentParser(prog="openproject_api.py")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sp = sub.add_parser("projects-list", help="List visible projects")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_projects_list)
+
+    sp = sub.add_parser("projects-resolve", help="Resolve visible projects by name or identifier")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name or identifier match")
+    sp.add_argument("--page-size", type=int, default=200)
+    sp.set_defaults(fn=cmd_projects_resolve)
+
     sp = sub.add_parser("project-get", help="Get project details")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.set_defaults(fn=cmd_project_get)
 
     sp = sub.add_parser("wp-get", help="Get one work package")
@@ -1291,18 +1330,18 @@ def build_parser():
     sp.set_defaults(fn=cmd_wp_get)
 
     sp = sub.add_parser("wp-list", help="List project work packages")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=100)
     sp.set_defaults(fn=cmd_wp_list)
 
     sp = sub.add_parser("wp-search-subject", help="Search by partial subject match")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--subject-like", required=True)
     sp.add_argument("--page-size", type=int, default=100)
     sp.set_defaults(fn=cmd_wp_search_subject)
 
     sp = sub.add_parser("wp-create", help="Create a work package")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--subject", required=True)
     sp.add_argument("--type-id", type=int)
     sp.add_argument("--description")
@@ -1348,7 +1387,7 @@ def build_parser():
     sp.set_defaults(fn=cmd_wp_activities_since)
 
     sp = sub.add_parser("wp-find", help="Find work packages using combined filters")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--subject-like")
     sp.add_argument("--status-name")
     sp.add_argument("--assignee-id", type=int)
@@ -1359,14 +1398,14 @@ def build_parser():
     sp.set_defaults(fn=cmd_wp_find)
 
     sp = sub.add_parser("wp-list-my-open", help="List open work packages assigned to current user")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=100)
     sp.add_argument("--max-pages", type=int, default=10)
     sp.set_defaults(fn=cmd_wp_list_my_open)
 
     sp = sub.add_parser("wp-due-soon", help="List work packages due within N days")
     sp.add_argument("--days", type=int, required=True)
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--assignee-id", type=int)
     sp.add_argument("--page-size", type=int, default=100)
     sp.add_argument("--max-pages", type=int, default=10)
@@ -1374,7 +1413,7 @@ def build_parser():
 
     sp = sub.add_parser("wp-stale", help="List work packages with no updates for N days")
     sp.add_argument("--inactive-days", type=int, required=True)
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=100)
     sp.add_argument("--max-pages", type=int, default=10)
     sp.set_defaults(fn=cmd_wp_stale)
@@ -1440,13 +1479,13 @@ def build_parser():
     sp.set_defaults(fn=cmd_users_resolve)
 
     sp = sub.add_parser("versions-list", help="List versions for a workspace")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=200)
     sp.set_defaults(fn=cmd_versions_list)
 
     sp = sub.add_parser("versions-resolve", help="Resolve version IDs by name in a workspace")
     sp.add_argument("--name", required=True)
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--exact", action="store_true", help="Require exact case-insensitive name match")
     sp.add_argument("--page-size", type=int, default=200)
     sp.set_defaults(fn=cmd_versions_resolve)
@@ -1501,7 +1540,7 @@ def build_parser():
     sp.set_defaults(fn=cmd_notifications_mark_resolved)
 
     sp = sub.add_parser("report-daily", help="Daily summary for project changes")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--since", help="YYYY-MM-DD; defaults to yesterday UTC")
     sp.add_argument("--page-size", type=int, default=100)
     sp.add_argument("--max-pages", type=int, default=10)
@@ -1511,7 +1550,7 @@ def build_parser():
     sp = sub.add_parser("report-assignee", help="Assignee-focused backlog and update summary")
     sp.add_argument("--assignee-id", type=int, required=True)
     sp.add_argument("--since", required=True, help="YYYY-MM-DD")
-    sp.add_argument("--project-id", type=int)
+    sp.add_argument("--project-id", type=int, required=True)
     sp.add_argument("--page-size", type=int, default=100)
     sp.add_argument("--max-pages", type=int, default=10)
     sp.add_argument("--limit", type=int, default=20)
